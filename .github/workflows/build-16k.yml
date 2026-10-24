@@ -120,7 +120,7 @@ jobs:
         run: |
           set -euo pipefail
           image="${TARGET_IMAGE}:${{ needs.detect.outputs.version }}-${{ matrix.suffix }}"
-          n="$(docker run --rm --entrypoint sh "$image" -c 'grep -cac jemalloc /usr/local/bin/appflowy_worker')"
+          n="$(docker run --rm --entrypoint sh "$image" -c 'grep -cac jemalloc /usr/local/bin/appflowy_worker; true')"
           docker run --rm --entrypoint ls "$image" -lh /usr/local/bin/appflowy_worker | tail -n1
           echo "jemalloc ヒット数: ${n}"
           if [ "$n" != "0" ]; then

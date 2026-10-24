@@ -1,0 +1,154 @@
+name: build-16k-worker
+
+# 毎晩 upstream (appflowyinc/appflowy_worker) に新しいバージョンが出ていないか検査し、
+# 新しければ OSS AppFlowy-Cloud ソース (jemalloc 非依存 = 16KB ページカーネルで動作) から
+# 16K 対応イメージをビルドして ureo/appflowy_worker_16k にプッシュする。
+# 公開アーキテクチャ構成は upstream に倣う: {VER}-amd64 / {VER}-arm64v8 / マニフェスト {VER} / latest
+on:
+  schedule:
+    - cron: '0 15 * * *'  # JST 00:00
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'タグバージョン (空 = upstream 最新を自動検出)'
+        required: false
+        default: ''
+      force:
+        description: '同一バージョンタグが既に存在しても再ビルドする'
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-16k.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-16k-worker
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_IMAGE: appflowyinc/appflowy_worker
+  TARGET_IMAGE: ureo/appflowy_worker_16k
+  SOURCE_REPO: AppFlowy-IO/AppFlowy-Cloud
+  SOURCE_REF: main
+
+jobs:
+  detect:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      build: ${{ steps.resolve.outputs.build }}
+    steps:
+      - name: Resolve upstream version / decide build
+        id: resolve
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          FORCE: ${{ github.event_name == 'push' || github.event.inputs.force == 'true' }}
+        run: |
+          set -euo pipefail
+          ver="$INPUT_VERSION"
+          if [ -z "$ver" ]; then
+            ver="$(for p in 1 2 3; do
+                      curl -fsSL --retry 3 "https://hub.docker.com/v2/repositories/${UPSTREAM_IMAGE}/tags/?page_size=100&ordering=last_updated&page=${p}" \
+                        | jq -r '.results[]?.name // empty'
+                    done | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sort -V | tail -n1)"
+          fi
+          if [ -z "$ver" ]; then
+            echo "::error::upstream バージョンを検出できませんでした"
+            exit 1
+          fi
+          echo "検出した upstream 最新版: $ver"
+          build=true
+          if [ "$FORCE" != "true" ] && \
+             curl -fs -o /dev/null "https://hub.docker.com/v2/repositories/${TARGET_IMAGE}/tags/${ver}"; then
+            build=false
+            echo "${TARGET_IMAGE}:${ver} は既に存在するためビルドをスキップします"
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            suffix: amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64v8
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - name: Checkout AppFlowy-Cloud (OSS source, jemalloc-free)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.SOURCE_REF }}
+          path: cloud
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & push ${{ matrix.suffix }}
+        uses: docker/build-push-action@v6
+        with:
+          context: cloud
+          file: cloud/services/appflowy-worker/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          load: true
+          provenance: false
+          tags: |
+            ${{ env.TARGET_IMAGE }}:${{ needs.detect.outputs.version }}-${{ matrix.suffix }}
+            ${{ env.TARGET_IMAGE }}:latest-${{ matrix.suffix }}
+
+      - name: Verify jemalloc-free binary (16KB-page capable)
+        run: |
+          set -euo pipefail
+          image="${TARGET_IMAGE}:${{ needs.detect.outputs.version }}-${{ matrix.suffix }}"
+          n="$(docker run --rm --entrypoint sh "$image" -c 'grep -cac jemalloc /usr/local/bin/appflowy_worker')"
+          docker run --rm --entrypoint ls "$image" -lh /usr/local/bin/appflowy_worker | tail -n1
+          echo "jemalloc ヒット数: ${n}"
+          if [ "$n" != "0" ]; then
+            echo "::error::バイナリに jemalloc が混入しています (16KB ページカーネルで起動不可)"
+            exit 1
+          fi
+          echo "✅ jemalloc-free: 16KB ページ環境で動作可能"
+
+  manifest:
+    needs: [detect, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create & push multi-arch manifest
+        env:
+          VER: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "${TARGET_IMAGE}:${VER}" \
+            -t "${TARGET_IMAGE}:latest" \
+            "${TARGET_IMAGE}:${VER}-amd64" \
+            "${TARGET_IMAGE}:${VER}-arm64v8"
+
+      - name: Show manifest
+        run: docker buildx imagetools inspect "${TARGET_IMAGE}:${{ needs.detect.outputs.version }}"

@@ -10,10 +10,10 @@ PROF_FLAG="${PROF_FLAG:---enable-prof}"
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-    autoconf automake libtool build-essential python3 pkg-config file >/dev/null
+    autoconf automake libtool build-essential git python3 pkg-config file >/dev/null
 else
-  dnf install -y -q autoconf automake libtool gcc gcc-c++ make python3 \
-    pkgconf diffutils >/dev/null
+  dnf install -y -q autoconf automake libtool git gcc gcc-c++ make \
+    python3 pkgconf diffutils patch >/dev/null
 fi
 
 git clone -q https://github.com/jemalloc/jemalloc jem

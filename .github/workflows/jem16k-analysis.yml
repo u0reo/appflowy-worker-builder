@@ -41,11 +41,13 @@ jobs:
       - name: Boot log on runner host (参考情報)
         run: |
           D='${{ steps.dock.outputs.cmd }}'
+          set +e
           timeout 120 $D docker run --rm --entrypoint /usr/local/bin/appflowy_worker \
             "${{ inputs.image }}" > results/boot.log 2>&1
-          echo "boot_exit=$?" >> results/boot.log || true
+          echo "boot_exit=$?" >> results/boot.log
+          set -e
           tail -5 results/boot.log || true
-          echo "abort_lines=$(grep -c 'Unsupported system page size' results/boot.log || true)"
+          grep -c 'Unsupported system page size' results/boot.log || true
       - name: Function fingerprints of official binary
         run: |
           python3 scripts/jem16k.py fp results/worker.bin --filter _rjem \
@@ -112,13 +114,14 @@ jobs:
         run: |
           { echo '## 関数指紋一致率: 公式 vs lg12 ビルド (高いほど移植可能)'
             echo '```'
-            python3 scripts/jem16k.py match arts/official/official_fp.txt \
-              arts/tc-*/fp12.txt 2>&1 || true
+            OF=$(find arts/official -name official_fp.txt | head -1)
+            F12=$(find arts -path '*tc-*' -name fp12.txt | sort)
+            python3 scripts/jem16k.py match "$OF" $F12 2>&1 || true
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: patches.json summary
         run: |
-          for d in arts/tc-*; do
-            [ -f "$d/patches.json" ] || continue
+          find arts -name patches.json | sort | while read -r pj; do
+            d=$(dirname "$pj")
             echo "---"
             echo "### $(head -1 "$d/meta.txt" 2>/dev/null || echo $d)"
             jq -c '.totals | {funcs, identical, changed_funcs, exact, renamed,

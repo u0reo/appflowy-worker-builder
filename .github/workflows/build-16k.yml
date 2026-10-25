@@ -261,24 +261,37 @@ jobs:
           set -euo pipefail
           # services+args スキーマ制約を避け、専用 network 上の素の docker run
           # で構成。共有 runner IP の匿名 pull 制限に備え pull はリトライ付き。
+          # 共有 runner からの docker.io 匿名/共有制限 (toomanyrequests) に備え
+          # mirror.gcr.io / quay.io へフォールバック。実際のエラー文言は
+          # annotation と summary へ出す (ログ viewing 不能でも読める様に)。
           pull() {
-            for a in 1 2 3; do
-              docker pull -q "$1" && return 0
-              echo "pull $1 attempt $a failed"; sleep 5
+            last=""
+            for img in "$@"; do
+              for a in 1 2; do
+                if out="$(docker pull -q "$img" 2>&1)"; then
+                  echo "$img"; return 0
+                fi
+                last="$out"; sleep 4
+              done
+              echo "attempt $img failed: $(printf %s "$last" | tail -1)"
             done
-            echo "smoke: image pull 失敗 $1" >> "$GITHUB_STEP_SUMMARY"
+            msg="image pull 失敗 [${*}] last=$(printf %s "$last" | tail -1 | tr -d "\r")"
+            echo "::error::$msg"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
             return 1
           }
           docker network create dep >/dev/null
-          pull postgres:15; pull redis:7
-          pull minio/minio:latest; pull minio/mc:latest
+          PG="$(pull postgres:15 mirror.gcr.io/library/postgres:15)"
+          RD="$(pull redis:7 mirror.gcr.io/library/redis:7)"
+          MDO="$(pull minio/minio:latest quay.io/minio/minio:latest)"
+          MC="$(pull minio/mc:latest quay.io/minio/mc:latest)"
           docker run -d --name pg --network dep \
             -e POSTGRES_USER=appflowy -e POSTGRES_PASSWORD=appflowy \
-            -e POSTGRES_DB=appflowy postgres:15 >/dev/null
-          docker run -d --name rd --network dep redis:7 >/dev/null
+            -e POSTGRES_DB=appflowy "$PG" >/dev/null
+          docker run -d --name rd --network dep "$RD" >/dev/null
           docker run -d --name mdo --network dep \
             -e MINIO_ROOT_USER=appflowy -e MINIO_ROOT_PASSWORD=appflowypass \
-            minio/minio:latest server /data >/dev/null
+            "$MDO" server /data >/dev/null
           pg=''; rd=''
           for i in $(seq 1 90); do
             pg="$(docker exec pg pg_isready -U appflowy -d appflowy >/dev/null 2>&1 && echo ok || true)"
@@ -290,7 +303,7 @@ jobs:
             echo "::error::deps 起動失敗 (pg=$pg redis=$rd)"
             exit 1
           fi
-          docker run --rm --network dep minio/mc:latest sh -c '
+          docker run --rm --network dep "$MC" sh -c '
             i=0
             while [ $i -lt 40 ]; do
               if mc alias set local http://mdo:9000 appflowy appflowypass &&
@@ -313,7 +326,7 @@ jobs:
       - name: Run worker and probe /metrics
         run: |
           set -euo pipefail
-          docker pull -q "${TARGET_IMAGE}:${VER}-amd64"
+          WK="$(pull "${TARGET_IMAGE}:${VER}-amd64")"
           docker run -d --name wk --network dep \
             -e APPFLOWY_ENVIRONMENT=production \
             -e APPFLOWY_WORKER_ENVIRONMENT=production \
@@ -334,7 +347,7 @@ jobs:
             -e APPFLOWY_MAILER_SMTP_USERNAME=smoke \
             -e APPFLOWY_MAILER_SMTP_PASSWORD=smoke \
             -e APPFLOWY_MAILER_SMTP_TLS_KIND=wrapper \
-            "${TARGET_IMAGE}:${VER}-amd64"
+            "$WK"
           ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' wk)"
           ok=false
           for i in $(seq 1 60); do

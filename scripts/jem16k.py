@@ -84,21 +84,53 @@ class Elf:
         shstrndx = struct.unpack_from('<H', d, 0x3e)[0]
         self.shstr_off = struct.unpack_from('<Q', d, shoff + shstrndx * shentsize + 24)[0]
         self.secs = []
+        self.shoff, self.shentsize = shoff, shentsize
         for i in range(shnum):
             o = shoff + i * shentsize
             name, stype = struct.unpack_from('<II', d, o)
+            flags = struct.unpack_from('<Q', d, o + 8)[0]
             addr = struct.unpack_from('<Q', d, o + 16)[0]
             off = struct.unpack_from('<Q', d, o + 24)[0]
             size = struct.unpack_from('<Q', d, o + 32)[0]
-            self.secs.append((name, stype, addr, off, size))
+            link = struct.unpack_from('<I', d, o + 40)[0]
+            self.secs.append((name, stype, flags, addr, off, size, link))
+
+    def sname(self, name):
+        z = self.d.index(b'\0', self.shstr_off + name)
+        return self.d[self.shstr_off + name:z].decode()
+
+    def funcs_sections(self):
+        """symtab ベースで関数を列挙: [(secname, data, off, size, fname)]。
+        -ffunction-sections で .text が .text.<func> へ分裂していても動く
+        (st_size が正しく入る relocatable .o / ld -r 合成 .o 用)。"""
+        execs = {i: (self.d[off:off + size], self.sname(nm))
+                 for i, (nm, stype, flags, addr, off, size, link)
+                 in enumerate(self.secs) if stype == 1 and flags & 0x4}
+        out = []
+        for i, (nm, stype, flags, addr, off, size, link) in enumerate(self.secs):
+            if stype != 2:      # SHT_SYMTAB
+                continue
+            stro = self.secs[link][4]   # .strtab の sh_offset
+            for e in range(size // 24):
+                o = off + e * 24
+                st_name, info = struct.unpack_from('<IB', self.d, o)
+                shndx, val, ssize = (struct.unpack_from('<HQ', self.d, o + 6)[0],
+                                     *struct.unpack_from('<QQ', self.d, o + 8))
+                if (info & 0xF) not in (1, 2, 10) or shndx not in execs or val >= len(execs[shndx][0]):
+                    continue
+                z = self.d.index(b'\0', stro + st_name)
+                fname = self.d[stro + st_name:z].decode()
+                if ssize == 0:
+                    continue
+                out.append((execs[shndx][1], execs[shndx][0], val,
+                            min(ssize, len(execs[shndx][0]) - val), fname))
+        return out
 
     def text(self):
-        for name, stype, addr, off, size in self.secs:
-            if stype != 1:
+        for name, stype, flags, addr, off, size, link in self.secs:
+            if stype != 1 or not flags & 0x4 or self.sname(name) != '.text':
                 continue
-            z = self.d.index(b'\0', self.shstr_off + name)
-            if self.d[self.shstr_off + name:z] == b'.text':
-                return bytes(self.d[off:off + size]), addr
+            return bytes(self.d[off:off + size]), addr
         raise SystemExit('.text section が見つかりません: ' + self.path)
 
 
@@ -140,13 +172,24 @@ def cmd_fp(a):
     for root in roots:
         e = Elf(root)
         e.path = root
-        data, base = e.text()
-        for name, off, size in func_spans(nm_syms(root, base, base + len(data)),
-                                          base, base + len(data)):
+        items = []                      # (name, data, off, size)
+        try:                            # 正常系: 単一の .text + nm 順序で span
+            data, base = e.text()
+            for name, off, size in func_spans(
+                    nm_syms(root, base, base + len(data)), base, base + len(data)):
+                items.append((name, data, off, size))
+        except SystemExit:
+            pass
+        if not items:                   # .text 分裂型 (.text.<func>) 対策
+            items = [(fname, sdata, off, size)
+                     for _s, sdata, off, size, fname
+                     in sorted(e.funcs_sections(), key=lambda x: x[4])]
+        for name, data, off, size in items:
             if a.filter and a.filter not in name:
                 continue
             words = struct.unpack_from('<%dI' % (size // 4), data, off)
-            h = hashlib.sha1(b''.join(struct.pack('<I', mword(w)) for w in words))
+            h = hashlib.sha1(b''.join(
+                struct.pack('<I', mword(w)) for w in words))
             key = name if len(roots) == 1 else f'{name}@{os.path.basename(root)}'
             print('%s %s %d' % (h.hexdigest()[:12], key, size // 4))
             n += 1
@@ -186,6 +229,9 @@ def func_map_objs(td, filt):
     else:
         files = [f for f in sorted(glob.glob(os.path.join(td, 'src', '*.o')))
                  if not f.endswith('.pic.o')]
+        if not files:   # configure 前ビルドツリー等のフォールバック
+            files = [f for f in sorted(glob.glob(os.path.join(td, '*.o')))
+                     if not f.endswith('.pic.o')]
     for f in files:
 
         for name, ins in iter_funcs([f]):

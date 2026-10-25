@@ -69,11 +69,16 @@ for LG in 12 14; do
   grep -q "define LG_PAGE $LG" \
     "b$LG/include/jemalloc/internal/jemalloc_internal_defs.h" \
     || { echo "LG_PAGE=$LG の設定に失敗"; tail -20 "b$LG/configure.log"; exit 1; }
-  # -ffunction-sections 系は関数が .text.<name> へ分散し fp が 0 件になる
-  # (run#5 fedora ffs の '関数 0 件')。ld -r で 1 つの .o に束ねてから解析。
-  ls "b$LG"/src/*.o | grep -v '\.pic\.o$' | xargs -r ld -r -o "all$LG.o" \
-    || { echo "ld -r 失敗"; exit 1; }
-  python3 /ws/scripts/jem16k.py fp "all$LG.o" --filter _rjem > "fp$LG.txt"
+  # 指紋: cmd_fp は単一 .text 型 (exe/通常 .o) も .text.<func> 分裂型
+  # (-ffunction-sections, run#5 fedora ffs の '関数 0 件') も symtab で吸収。
+  # ビルドツリー b$LG/ を直接舐める。all$LG.o 合成はおまけ (多重定義で
+  # ld -r が失敗することがあるので必須にしない)。
+  mkdir -p ctx/fp/"$LG"
+  python3 /ws/scripts/jem16k.py fp "b$LG" --filter _rjem > "fp$LG.txt" \
+    || { echo "指紋化失敗"; exit 1; }
+  cp "fp$LG.txt" ctx/fp/"$LG"/
+  ls "b$LG"/src/*.o 2>/dev/null | grep -v '\.pic\.o$' \
+    | xargs -r ld -r -o "all$LG.o" 2>/dev/null || :
   gcc -O2 -o "t$LG" /ws/scripts/t16k.c "b$LG/lib/libjemalloc.a" \
     -lpthread -lm -ldl
 done
@@ -92,5 +97,9 @@ HP=$(getconf PAGE_SIZE)
 } > control.txt
 cat control.txt
 
-python3 /ws/scripts/jem16k.py diff all12.o all14.o --filter _rjem > patches.json
+if [ -s all12.o ] && [ -s all14.o ]; then
+  python3 /ws/scripts/jem16k.py diff all12.o all14.o --filter _rjem > patches.json
+else
+  python3 /ws/scripts/jem16k.py diff b12 b14 --filter _rjem > patches.json
+fi
 echo "done: $(ls -1 *.txt *.json | tr '\n' ' ')"

@@ -336,3 +336,63 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+RE_CMPXZR = re.compile(r'^subs?\s+xzr,')
+RE_ADDSXZR = re.compile(r'^adds?\s+xzr,')
+
+
+def cmpnorm(t):
+    t = t.strip()
+    t = RE_CMPXZR.sub('cmp ', t)
+    t = RE_ADDSXZR.sub('cmn ', t)
+    return t
+
+
+def disasm_funcs(path):
+    """単一バイナリの全 disasm -> {name: [(addr, word, text)]}"""
+    import subprocess
+    out = subprocess.run(
+        ['objdump', '-d', '-M', 'no-aliases', path],
+        capture_output=True, text=True).stdout
+    funcs, cur = {}, None
+    for l in out.splitlines():
+        m = re.match(r'^[0-9a-f]+ <(.+)>:', l)
+        if m:
+            cur = m.group(1)
+            funcs[cur] = []
+        elif cur is not None:
+            m = re.match(r'^\s+([0-9a-f]+):\s+([0-9a-f]+)\s+(.*)', l)
+            if m:
+                funcs[cur].append((int(m.group(1), 16),
+                                   int(m.group(2), 16), m.group(3).strip()))
+    return funcs
+
+
+def evid_census(b12, b14):
+    """関数単列 align -> {changed_key: [(w12,w14)}, {same_key set}"""
+    import collections
+    import difflib
+    F12, F14 = disasm_funcs(b12), disasm_funcs(b14)
+    changed = collections.defaultdict(set)
+    same = set()
+    for n, f12 in F12.items():
+        f14 = F14.get(n)
+        if f14 is None:
+            continue
+        t12 = [cmpnorm(dnorm(x[2])) for x in f12]
+        t14 = [cmpnorm(dnorm(x[2])) for x in f14]
+        if len(f12) == len(f14) and t12 == t14:
+            pairs = list(zip(range(len(f12)), range(len(f14))))
+        else:
+            pairs = [(x, y) for blk in difflib.SequenceMatcher(
+                None, t12, t14, autojunk=False).get_matching_blocks()
+                for x, y in zip(range(blk.a, blk.a + blk.size),
+                                range(blk.b, blk.b + blk.size))]
+        for i, j in pairs:
+            key = regnorm(cmpnorm(norm(f12[i][2])))
+            if f12[i][1] == f14[j][1]:
+                same.add(key)
+            else:
+                changed[key].add((f12[i][1], f14[j][1]))
+    return changed, same

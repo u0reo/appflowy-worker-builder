@@ -106,15 +106,56 @@ slim イメージ git/ca-certificates 無し→apt、federation のみ→crate t
   分裂型も symtab で吸収。ページ由来即値以外をマスクした上で SHA1
 - `patch_worker.py` — 公式 exe のページ定数サイトをテンプレート+census で
   書き換えて 16K 版を出力 (report-first、`--apply` で実書き込み)
+- `wscan_worker.py` — 語レベル census 差分ストリーミング patcher
+  (symtab スコープ + ページ派生 whitelist + t14 ground-truth 検証)。
+  Plan B 実証用の実験ツールとして記録 (NO-GO 結論後も再現Hands本体)
 - `ci_toolchain_build.sh` / `t16k.c` — コンテナ内 jemalloc 二重ビルド +
   ページ整合性テストプログラム / `post_comment.py` — 結果の commit comment 試行
   (GITHUB_TOKEN では 403: "Resource not accessible by integration"。annotation
   側で代替済み)
 
+## Plan B (公式 exe のバイナリパッチ) 最終評価: **NO-GO (実証)**
+
+源码変更不要で公式 `appflowyinc/appflowy_worker` exe 自体を 16K 化する
+バイナリパッチ経路を最後まで実装した結果、** jemalloc のビルド同一性が
+確保できないため sound に完了不可能であることが実証された **。
+
+### 実施した最良の実装
+- `wscan_worker.py`: ストリーミング語_level 差分 census パッチャ。
+  symtab 実サイズで _rjem 関数スコープを厳密化 (dynsym では Rust 側が
+  偽 _rjem 化して 91,928 サイトが毒になった)。
+- ページ派生 whitelist (`pair_ok`): movz #0x1000→#0x4000 / ubfm shift
+  12→14 のみ許可 → 125 語で EACG 手前まで正常。
+- **ground truth 検証**: 16K 版テストビルド t14 の語集合に変換後語が
+  実在するサイトのみ適用 (621 語: ldr 132 / add 96 / and 89 / ubfm 78 …)。
+  `add x23,#0x8,lsl #12`→`#0x20,lsl #12` 等で **EACG クラッシュは解消**
+  したが、次機能 (bin_info_boot) で別失敗が連鎖。
+
+### NO-GO の決定的根拠
+- worker の jemalloc 関数内語集合 ∩ t12 = **43.7%** (∩t14 = 40.8%) —
+  tc 二重ビルドと公式同梱 jemalloc は **同一ビルドですらない**
+  (関数指紋一致率 1.2–1.9% と整合)。
+- tc で実測した struct フィールド offset 移動は **任意値**
+  (例: 25648→23296 = −2352)。Δ=12288 の倍数という算術仮定は棄却され、
+  43.7% の語共有しか無い別ビルドへ offset を移植すると
+  残 56% の-site が不整合になる (crash matrix で実証:
+  pagefunc 単体=rust_oom / 全 decision=EACG ldar / 厳密 125=EACG /
+  W14 検証 621=bin_info_boot)。
+- 結論: 公式 exe のみの情報では 16K 再コンパイルと語位に一致する
+  変換表を生成不能。**16K 化はソース (jemalloc lg=14) ビルド一択**。
+
+### 副産物として確定した事実 (修正済み理解)
+- PIE bias (非 ASLR gdb) = **0x555555550000**、vaddr→file offset =
+  −0x100000 (exec PT_LOAD off=0x119fe80/vaddr=0x11afe80)。
+- `ldr x1,[x1,#25648]` (foff 0x48df7cc, EACG 内) は **実在** する
+  (以前の「worker 側に無い」は bias 1 nibble 誤差的的中)。
+- objdump `--start-address` はこの exe で空出力になる運用上の癖あり →
+  フルダンプ (`disas_full.txt`) か gdb ライブで照合すること。
+
 ## 状態 / 残作業
 
 - [x] jemalloc provenance 確定 / analysis 全緑 / 16K 動作実証 / GO 判定
-- [ ] patch_worker.py 本実装 (A+B マージ) → パッチ版 w19.bin を Pi で boot 検証
-- [ ] build-16k.yml に extract→patch→再パッケージ→push ジョブ追加
+- [x] patch_worker.py / wscan_worker.py 実装 → **Plan B は NO-GO 実証 (上節)**
+- [x] 16K 実運用 = ソースビルド `ureo/appflowy_worker_16k` (稼働確認済み Up)。build-16k.yml はソースビルド系として維持 (バイナリパッチ job は追加しない)
 - [ ] dc/appflowy/compose.yml worker へ healthcheck (`/metrics` 200 ポール) 適用
 - [ ] 実スタックでのスモーク (ワーカー実作業 → /metrics 確認)

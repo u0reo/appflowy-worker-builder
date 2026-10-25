@@ -1,4 +1,7 @@
 name: jem16k GO/NO-GO analysis
+permissions:
+  contents: read
+  issues: write   # analyze 結果を commit comment に公開 (匿名で読める成果物のため)
 on:
   workflow_dispatch:
     inputs:
@@ -85,18 +88,28 @@ jobs:
           elif sudo docker info >/dev/null 2>&1; then echo cmd='sudo ' >> "$GITHUB_OUTPUT"
           else echo 'docker を起動できない'; exit 1; fi
       - name: Build jemalloc lg12 + lg14 in container
+        shell: bash
         run: |
+          set -uo pipefail   # tee 経由の終了コードマスキング防止 (pseudo-success 対策)
           D='${{ steps.dock.outputs.cmd }}'
           mkdir -p ctx
-          $D docker run --rm -v "$PWD:/ws" -w /ws/ctx \
+          LOG="ctx/build-${{ strategy.job-index }}.stdout.log"
+          if $D docker run --rm -v "$PWD:/ws" -w /ws/ctx \
             -e CRATE_VER='${{ inputs.crate_version }}' \
             -e JEMALLOC_REF='${{ inputs.jemallocator_ref }}' \
             -e EXTRA_CFLAGS='${{ matrix.extra }}' \
             -e PROF_FLAG='${{ matrix.prof }}' \
             -e TAG='container=${{ matrix.container }} CFLAGS=[${{ matrix.extra }}] ${{ matrix.prof }}' \
             '${{ matrix.container }}' \
-            bash -c 'ls -l /ws/scripts >/dev/null && exec bash /ws/scripts/ci_toolchain_build.sh' \
-            2>&1 | tee "ctx/build-${{ strategy.job-index }}.stdout.log"
+            bash -xc 'ls -l /ws/scripts >/dev/null && exec bash /ws/scripts/ci_toolchain_build.sh' \
+            > "$LOG" 2>&1; then
+            echo "build OK: $(sed -n 1p "$LOG")"
+          else
+            rc=$?
+            # 失敗ログ末尾を注釈に埋め込む (check-run annotations は匿名で読める)
+            echo "::error::${{ matrix.container }}[${{ matrix.prof }}] rc=$rc :: $(tail -c 1200 "$LOG" | tr '\n\r' '  ')"
+            exit "$rc"
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -122,7 +135,7 @@ jobs:
             OF=$(find arts/official -name official_fp.txt | head -1)
             F12=$(find arts -path '*tc-*' -name fp12.txt | sort)
             python3 scripts/jem16k.py match "$OF" $F12 2>&1 || true
-            echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY" summary.md
       - name: patches.json summary
         run: |
           find arts -name patches.json | sort | while read -r pj; do
@@ -135,4 +148,12 @@ jobs:
             jq '.totals.pattern_census | to_entries[:12]' "$d/patches.json"
           done > summary.txt 2>&1
           { echo '## lg12→lg14 差分の内訳 (conf=exact/renamed が多いほど安全)'
-            echo '```'; cat summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo '```'; cat summary.txt; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY" summary.md
+
+      - name: Publish summary as commit comment (匿名で読める場所へ)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ -s summary.md ] || printf 'summary.md が空でした (analyze 本体を logs で確認してください)\n' > summary.md
+          python3 scripts/post_comment.py "$GITHUB_SHA" summary.md

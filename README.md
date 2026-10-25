@@ -42,6 +42,18 @@ GitHub Actions (`cron` 毎晩 JST 0:00):
 docker compose pull worker && docker compose up -d worker
 ```
 
+## ビルドキャッシュ
+
+`type=registry` (Docker Hub) を採用。ビルド時に中間段込み (`mode=max`) の
+BuildKit キャッシュを OCI artifact として `ureo/appflowy_worker_16k:buildcache-{amd64,arm64v8}`
+へ書き出し、次回は `cache-from` から復元する。Docker Hub 上のタグとして見えるため、
+`-`(ハイフン) 付き納品タグと区別しやすい `buildcache-` 接頭辞を付けている。
+
+- 効果: ソース凍結のため次回ビルドは cargo chef cook 層まで全ヒット (30分 → 数分)
+- Docker Hub 選択理由: 納品物と同じレジストリで認証を統一 (DOCKERHUB_TOKEN のみ)、
+  公開リポジトリなのでストレージ実質無制限。GitHub Actions cache (type=gha) は
+  7日未アクセスで失効するため、ビルドが滅多に走らない本運用には不向き
+
 ## 注意点
 
 - ソースはアーカイブ済み OSS リポジトリの `main` のため、機能的には OSS 最終段階相当。

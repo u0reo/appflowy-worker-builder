@@ -115,6 +115,13 @@ jobs:
           tags: |
             ${{ env.TARGET_IMAGE }}:${{ needs.detect.outputs.version }}-${{ matrix.suffix }}
             ${{ env.TARGET_IMAGE }}:latest-${{ matrix.suffix }}
+          # Docker Hub レジストリキャッシュ (OCI artifact, 中間段込み mode=max)。
+          # ネイティブ cargo ビルド (~30分) を次回 ~数分に短縮。
+          # per-arch ref にして amd64/arm64 同時書き込みの衝突を回避。
+          # 納品タグと同じ repo 内 (buildcache-* タグ) = 既存公開 repo なので
+          # 自動作成の可視性/クォータ懸念なし。
+          cache-from: type=registry,ref=${{ env.TARGET_IMAGE }}:buildcache-${{ matrix.suffix }},image-manifest=true
+          cache-to: type=registry,ref=${{ env.TARGET_IMAGE }}:buildcache-${{ matrix.suffix }},mode=max,image-manifest=true,ignore-empty=true,oci-mediatypes=true
 
       - name: Verify jemalloc-free binary (16KB-page capable)
         run: |

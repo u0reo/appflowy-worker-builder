@@ -3,7 +3,8 @@ name: build-16k-worker
 # 毎晩 upstream (appflowyinc/appflowy_worker) に新しいバージョンが出ていないか検査し、
 # 新しければ OSS AppFlowy-Cloud ソース (jemalloc 非依存 = 16KB ページカーネルで動作) から
 # 16K 対応イメージをビルドして ureo/appflowy_worker_16k にプッシュする。
-# 公開アーキテクチャ構成は upstream に倣う: {VER}-amd64 / {VER}-arm64v8 / マニフェスト {VER} / latest
+# 公開タグ構成は upstream に倣う: {VER}-amd64 / {VER}-arm64v8 / マニフェスト {VER} / latest
+# ビルドキャッシュ: Docker Hub registry cache (mode=max) を次回実行時に cache-from で復元
 on:
   schedule:
     - cron: '0 15 * * *'  # JST 00:00

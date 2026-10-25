@@ -291,6 +291,7 @@ jobs:
           # 達でも /metrics 200 + 生存を確認済みなので失敗時は S3 なしで続行。
           MDO="$(PULL_ANNOT=warning pull minio/minio:latest quay.io/minio/minio:latest || true)"
           MC="$(PULL_ANNOT=warning pull minio/mc:latest quay.io/minio/mc:latest || true)"
+          echo "MDO=$MDO" >> "$GITHUB_ENV"
           docker run -d --name pg --network dep \
             -e POSTGRES_USER=appflowy -e POSTGRES_PASSWORD=appflowy \
             -e POSTGRES_DB=appflowy "$PG" >/dev/null
@@ -324,7 +325,7 @@ jobs:
                  mc mb -p local/appflowy; then exit 0; fi
               i=$((i+1)); sleep 3
             done
-            exit 1''; then
+            exit 1'; then
             echo "::warning::minio バケット作成失敗 — worker 検証は継続"
           fi
 
@@ -347,8 +348,8 @@ jobs:
           WK="$(pull "${TARGET_IMAGE}:${VER}-amd64")"
           # minio 不在時は到達不能 URL を使用 (Pi 実測で connection refused
           # なら起動に支障がないことを確認済み)
-          S3URL="${MDO:+http://mdo:9000}"
-          S3URL="${S3URL:-http://127.0.0.1:9999}"
+          if [ -n "${MDO:-}" ]; then S3URL=http://mdo:9000
+          else S3URL=http://127.0.0.1:9999; fi
           docker run -d --name wk --network dep \
             -e APPFLOWY_ENVIRONMENT=production \
             -e APPFLOWY_WORKER_ENVIRONMENT=production \

@@ -137,6 +137,165 @@ jobs:
           fi
           echo "✅ jemalloc-free: 16KB ページ環境で動作可能"
 
+  fidelity:
+    name: 忠実性 — 公式exeと同系統か (関数名集合)
+    # 夜間ごとに latest 相当へ回帰チェック (ビルド有無に依らず実行)
+    needs: [detect, manifest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VER: ${{ needs.detect.outputs.version }}
+    steps:
+      - name: Extract arm64 exes (official / ours)
+        run: |
+          set -euo pipefail
+          mkdir -p bins
+          for spec in "official=${UPSTREAM_IMAGE}:${VER}-arm64v8" \
+                      "ours=${TARGET_IMAGE}:${VER}-arm64v8"; do
+            name="${spec%%=*}"; img="${spec#*=}"
+            docker pull --platform linux/arm64 "$img" >/dev/null
+            cid="$(docker create --platform linux/arm64 "$img" true)"
+            docker cp "$cid:/usr/local/bin/appflowy_worker" "bins/$name.bin"
+            docker rm -f "$cid" >/dev/null
+            echo "$name: $(stat -c%s bins/$name.bin) bytes"
+          done
+      - name: Compare appflowy function-name sets
+        run: |
+          set -euo pipefail
+          # 関数名からジェネリック単相化ハッシュ (…17h<16hex>E) を 정규화して集合化。
+          # アロケータ (jemalloc) 有無は worker 由来名には無関係なので信号は clean。
+          names() {
+            readelf -sW "$1" \
+              | awk '$5=="FUNC" && $7!="UND" {print $NF}' \
+              | grep -a appflowy \
+              | sed -E 's/1[0-9]h[0-9a-f]{16}E$/E/' | sort -u
+          }
+          names bins/official.bin > bins/official.names
+          names bins/ours.bin     > bins/ours.names
+          python3 - <<'PY'
+          import sys
+          o = set(open('bins/official.names').read().split())
+          u = set(open('bins/ours.names').read().split())
+          inter = len(o & u)
+          cover = inter / len(o) if o else 0      # 公式の関数を ours が覆っているか
+          jac = inter / len(o | u) if o | u else 0
+          only_off = sorted(o - u)[:15]
+          msg = (f"official names={len(o)} ours={len(u)} "
+                 f"coverage(official⊆ours)={cover:.3f} jaccard={jac:.3f}")
+          print(msg)
+          with open('/tmp/summary.md', 'w') as f:
+              f.write('## 忠実性チェック (appflowy系 関数名集合)\n\n'
+                      + msg.replace('⊆', '$\\subseteq$') + '\n\n')
+              if only_off:
+                  f.write('公式にあって ours に無い例:\n```\n'
+                          + '\n'.join(only_off) + '\n```\n')
+          if cover < 0.5 or inter == 0:
+              print(f"::error::系統不一致 ({msg})")
+              sys.exit(1)
+          if cover < 0.85:
+              print(f"::warning::公式の新機能が ours に未吸収の可能性 ({msg})")
+          PY
+          cat /tmp/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+  smoke:
+    name: スモーク — 起動 /metrics 200 / panic 無し
+    needs: [detect, manifest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VER: ${{ needs.detect.outputs.version }}
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: appflowy
+          POSTGRES_PASSWORD: appflowy
+          POSTGRES_DB: appflowy
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U appflowy -d appflowy"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+      minio:
+        image: minio/minio:latest
+        env:
+          MINIO_ROOT_USER: appflowy
+          MINIO_ROOT_PASSWORD: appflowypass
+        ports: ['9000:9000']
+        args: server /data
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create bucket
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if docker run --rm --network host minio/mc sh -c '
+                mc alias set local http://127.0.0.1:9000 appflowy appflowypass &&
+                mc mb -p local/appflowy; true'; then break; fi
+            sleep 3
+          done
+
+      - name: Run worker (amd64) and probe /metrics
+        run: |
+          set -euo pipefail
+          docker pull -q "${TARGET_IMAGE}:${VER}-amd64"
+          docker run -d --name smoke --network host \
+            -e APPFLOWY_ENVIRONMENT=production \
+            -e APPFLOWY_WORKER_ENVIRONMENT=production \
+            -e RUST_LOG=info \
+            -e APPFLOWY_WORKER_REDIS_URL=redis://127.0.0.1:6379/8 \
+            -e APPFLOWY_WORKER_DATABASE_URL=postgres://appflowy:appflowy@127.0.0.1:5432/appflowy \
+            -e APPFLOWY_WORKER_DATABASE_NAME=appflowy \
+            -e APPFLOWY_WORKER_IMPORT_TICK_INTERVAL=5 \
+            -e APPFLOWY_S3_USE_MINIO=true \
+            -e APPFLOWY_S3_MINIO_URL=http://127.0.0.1:9000 \
+            -e APPFLOWY_S3_ACCESS_KEY=appflowy \
+            -e APPFLOWY_S3_SECRET_KEY=appflowypass \
+            -e APPFLOWY_S3_BUCKET=appflowy \
+            -e APPFLOWY_S3_REGION=us-east-1 \
+            -e APPFLOWY_MAILER_SMTP_HOST=127.0.0.1 \
+            -e APPFLOWY_MAILER_SMTP_PORT=2525 \
+            -e APPFLOWY_MAILER_SMTP_EMAIL=no-reply@example.com \
+            -e APPFLOWY_MAILER_SMTP_USERNAME=smoke \
+            -e APPFLOWY_MAILER_SMTP_PASSWORD=smoke \
+            -e APPFLOWY_MAILER_SMTP_TLS_KIND=none \
+            "${TARGET_IMAGE}:${VER}-amd64"
+          ok=false
+          for i in $(seq 1 60); do
+            code="$(curl -s -o /tmp/metrics.txt -w '%{http_code}' \
+                    http://127.0.0.1:4001/metrics || true)"
+            if [ "$code" = "200" ]; then ok=true; break; fi
+            if ! docker inspect -f '{{.State.Running}}' smoke | grep -q true; then
+              echo '::error::worker が起動中に終了'; docker logs --tail 120 smoke; exit 1
+            fi
+            sleep 2
+          done
+          if [ "$ok" != true ]; then
+            echo "::error::/metrics が 200 を返さずタイムアウト"
+            docker logs --tail 120 smoke; exit 1
+          fi
+          # /metrics 成功後もループが回り続けること (遅発 panic / アロケータ失敗検知)
+          sleep 25
+          docker inspect -f '{{.State.Running}}' smoke | grep -q true || {
+            echo '::error::起動後にクラッシュ'; docker logs --tail 120 smoke; exit 1; }
+          docker logs smoke >& /tmp/worker.log || true
+          if grep -qE 'panicked at|memory allocation of' /tmp/worker.log; then
+            echo '::error::panic / アロケータ失敗を検出'
+            grep -E 'panicked at|memory allocation of' /tmp/worker.log | head -5
+            exit 1
+          fi
+          echo '## smoke OK — /metrics 200 + 25s survival' >> "$GITHUB_STEP_SUMMARY"
+          { echo ''; echo '```'; tail -n 12 /tmp/worker.log; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
+          curl -s http://127.0.0.1:4001/metrics | head -5 >> "$GITHUB_STEP_SUMMARY"
+
   manifest:
     needs: [detect, build]
     runs-on: ubuntu-24.04

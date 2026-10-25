@@ -81,7 +81,7 @@ LG_PAGE: mov #0xc→#0xe (52800189→528001c9)  cmn #0xfff→#0x3fff: 表現不�
 | workflow | 内容 |
 |---|---|
 | `jem16k-analysis.yml` | extract (公式イメージ→exe 抽出+sha256+指紋) / toolchains ×16 (debian12,u22,u24,fedora42 × CFLAGS{-ffunction-sections…} × --enable-prof、crate tarball を formula と同一の configure フラグで lg12+lg14 二重ビルド、指紋・patches.json 生成) / analyze (一致率 + census、結果を **check-run annotation** で公開 = 匿名で読める) |
-| `build-16k.yml` | 夜間ビルダー (ureo/appflowy_worker_16k) — パッチ適用job追加予定 |
+| `build-16k.yml` | 夜間ビルダー (ureo/appflowy_worker_16k): detect (upstream 最新タグ検出) → build ×2arch (registry cache) → manifest → **fidelity** (公式 exe と appflowy系 関数名集合を比較、coverage<0.5 で fail・<0.85 で warn) → **smoke** (amd64 を postgres/redis/minio 付きで起動、/metrics 200 + 25s survival + panic/アロケータ失敗なし を検証。ビルド有無に関係なく毎晩実行) |
 
 実績: **run#6 (40193711212) = 16/16 ツールチェーン成功**・extract/analyze 成功、
 結果注釈を匿名取得済み。過去 run の失敗原因(.arm ランナーに docker 無し→install、

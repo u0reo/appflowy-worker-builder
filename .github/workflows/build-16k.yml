@@ -258,7 +258,9 @@ jobs:
 
       - name: Start deps (postgres / redis / minio)
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          # 失敗したコマンドを annotation で可視化 (ログ viewing 不能対策)
+          trap 'echo "::error::[Start deps] line $LINENO: $BASH_COMMAND (exit $?)" >&2' ERR
           # services+args スキーマ制約を避け、専用 network 上の素の docker run
           # で構成。共有 runner IP の匿名 pull 制限に備え pull はリトライ付き。
           # 共有 runner からの docker.io 匿名/共有制限 (toomanyrequests) に備え
@@ -342,7 +344,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Run worker and probe /metrics
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          trap 'echo "::error::[Run worker] line $LINENO: $BASH_COMMAND (exit $?)" >&2' ERR
           # pull() は Start deps の shell 関数なのでこの步骤で再定義
           pull() { docker pull -q "$1" 2>/dev/null && echo "$1"; }
           WK="$(pull "${TARGET_IMAGE}:${VER}-amd64")"

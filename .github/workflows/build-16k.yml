@@ -347,7 +347,10 @@ jobs:
           set -Eeuo pipefail
           trap 'echo "::error::[Run worker] line $LINENO: $BASH_COMMAND (exit $?)" >&2' ERR
           # pull() は Start deps の shell 関数なのでこの步骤で再定義
-          pull() { docker pull -q "$1" 2>/dev/null && echo "$1"; }
+          # pull -q はイメージIDを stdout に出すので、名前だけを返したいなら
+          # pull の出力を捨てて echo "$1" する (旧版は ID+名 の2行値になり
+          # 無効な image reference で docker run が exit 125 になった)
+          pull() { docker pull -q "$1" >/dev/null 2>&1 && echo "$1"; }
           WK="$(pull "${TARGET_IMAGE}:${VER}-amd64")"
           # minio 不在時は到達不能 URL を使用 (Pi 実測で connection refused
           # なら起動に支障がないことを確認済み)

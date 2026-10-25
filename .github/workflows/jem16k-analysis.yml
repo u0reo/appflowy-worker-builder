@@ -157,3 +157,17 @@ jobs:
         run: |
           [ -s summary.md ] || printf 'summary.md が空でした (analyze 本体を logs で確認してください)\n' > summary.md
           python3 scripts/post_comment.py "$GITHUB_SHA" summary.md
+
+      - name: Expose summary as annotations (匿名フォールバック通道)
+        if: always()
+        run: |
+          # check-run annotations は要認証なく job ページで読める唯一の確実な場所
+          [ -s summary.md ] || echo 'summary.md が空' > summary.md
+          split -b 60000 summary.md ann. 2>/dev/null || true
+          n=0
+          for f in ann.*; do
+            n=$((n+1))
+            printf '::error title=SUMMARY part %d::' "$n"
+            tr '\n\r' '  ' < "$f" | sed 's/%/%25/g' | head -c 63000
+            echo
+          done

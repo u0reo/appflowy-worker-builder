@@ -181,9 +181,13 @@ def iter_funcs(args):
 
 def func_map_objs(td, filt):
     d = {}
-    for f in sorted(glob.glob(os.path.join(td, 'src', '*.o'))):
-        if f.endswith('.pic.o'):
-            continue
+    if os.path.isfile(td):
+        files = [td]
+    else:
+        files = [f for f in sorted(glob.glob(os.path.join(td, 'src', '*.o')))
+                 if not f.endswith('.pic.o')]
+    for f in files:
+
         for name, ins in iter_funcs([f]):
             if filt and filt not in name:
                 continue

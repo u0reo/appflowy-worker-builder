@@ -18,5 +18,8 @@ req = urllib.request.Request(url, data=body, method="POST", headers={
 try:
     r = urllib.request.urlopen(req)
     print("commit comment posted:", r.status)
+except urllib.error.HTTPError as e:
+    print("::warning::commit comment 送信失敗 HTTP", e.code,
+          e.read()[:500].decode("utf-8", "replace"))
 except Exception as e:
     print("::warning::commit comment 送信失敗:", e)

@@ -14,7 +14,11 @@ PROF_FLAG="${PROF_FLAG:---enable-prof}"
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-    autoconf automake libtool build-essential git python3 pkg-config file >/dev/null
+    ca-certificates curl autoconf automake libtool build-essential git \
+    python3 pkg-config file >/dev/null
+  # debian/ubuntu 公式イメージは ca-certificates 同梱でないので curl/git が
+  # https で全滅する (run#5 で CAfile: none を確認)。apt 経由で入れたら有効化。
+  update-ca-certificates >/dev/null 2>&1 || true
 else
   dnf install -y -q autoconf automake libtool git gcc gcc-c++ make \
     python3 pkgconf diffutils patch >/dev/null
@@ -65,7 +69,11 @@ for LG in 12 14; do
   grep -q "define LG_PAGE $LG" \
     "b$LG/include/jemalloc/internal/jemalloc_internal_defs.h" \
     || { echo "LG_PAGE=$LG の設定に失敗"; tail -20 "b$LG/configure.log"; exit 1; }
-  python3 /ws/scripts/jem16k.py fp "b$LG" --filter _rjem > "fp$LG.txt"
+  # -ffunction-sections 系は関数が .text.<name> へ分散し fp が 0 件になる
+  # (run#5 fedora ffs の '関数 0 件')。ld -r で 1 つの .o に束ねてから解析。
+  ls "b$LG"/src/*.o | grep -v '\.pic\.o$' | xargs -r ld -r -o "all$LG.o" \
+    || { echo "ld -r 失敗"; exit 1; }
+  python3 /ws/scripts/jem16k.py fp "all$LG.o" --filter _rjem > "fp$LG.txt"
   gcc -O2 -o "t$LG" /ws/scripts/t16k.c "b$LG/lib/libjemalloc.a" \
     -lpthread -lm -ldl
 done
@@ -84,5 +92,5 @@ HP=$(getconf PAGE_SIZE)
 } > control.txt
 cat control.txt
 
-python3 /ws/scripts/jem16k.py diff b12 b14 --filter _rjem > patches.json
+python3 /ws/scripts/jem16k.py diff all12.o all14.o --filter _rjem > patches.json
 echo "done: $(ls -1 *.txt *.json | tr '\n' ' ')"

@@ -39,18 +39,19 @@ for LG in 12 14; do
     -lpthread -lm -ldl
 done
 
-# 16K ホスト対照: lg12 は abort、lg14 は OK 出力が正しい結果
-set +e
-./t12 > t12.out 2>&1; rc12=$?
-./t14 > t14.out 2>&1; rc14=$?
-set -e
+# ホスト実行対照: compile/link はページサイズ非依存だが実行時 init は整合必須。
+# lg ページ == ホストページ のビルドのみ OK が期待値 (不一致側は abort 正常)。
+HP=$(getconf PAGE_SIZE)
 {
-  echo "lg12 rc=$rc12 (16K では !=0 + 'Unsupported system page size' 想定)"
-  echo "lg14 rc=$rc14 (=0 + OK 想定)"
-  grep -o 'Unsupported system page size' t12.out | head -1 || true
-  echo "lg14 stdout: $(cat t14.out)"
+  echo "host PAGE_SIZE=$HP"
+  for LG in 12 14; do
+    SZ=$((1 << LG))
+    set +e; "./t$LG" > "t$LG.out" 2>&1; RC=$?; set -e
+    if [ "$SZ" = "$HP" ]; then EXP='rc=0 + OK'; else EXP='!=0 + abort 系'; fi
+    echo "lg$LG (page=$SZ) rc=$RC expect: $EXP | out: $(head -c 120 "t$LG.out" | tr '\n' ' ')"
+  done
 } > control.txt
 cat control.txt
 
 python3 /ws/scripts/jem16k.py diff b12 b14 --filter _rjem > patches.json
-echo "done: $(ls -1 *.txt *.json)"
+echo "done: $(ls -1 *.txt *.json | tr '\n' ' ')"

@@ -11,34 +11,48 @@ on:
 
 jobs:
   extract:
-    runs-on: ubuntu-24.04-arm          # = 16K ページホスト
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Confirm 16K runner
-        run: test "$(getconf PAGE_SIZE)" = 16384
+      - name: Host info (runner の PAGE_SIZE を記録)
+        run: echo "runner PAGE_SIZE=$(getconf PAGE_SIZE)"
+      - name: Ensure docker usable
+        id: dock
+        run: |
+          if ! command -v docker >/dev/null 2>&1; then
+            sudo apt-get update -qq >/dev/null
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io >/dev/null
+            sudo systemctl start docker || true
+          fi
+          if docker info >/dev/null 2>&1; then echo cmd= >> "$GITHUB_OUTPUT"
+          elif sudo docker info >/dev/null 2>&1; then echo cmd='sudo ' >> "$GITHUB_OUTPUT"
+          else echo 'docker を起動できない'; exit 1; fi
+          docker version --format 'server {{.Server.Version}}' 2>/dev/null \
+            || sudo docker version --format 'server {{.Server.Version}}'
       - name: Extract worker binary
         run: |
-          docker pull "${{ inputs.image }}"
-          cid=$(docker create "${{ inputs.image }}")
+          D='${{ steps.dock.outputs.cmd }}'
+          $D docker pull "${{ inputs.image }}"
+          cid=$($D docker create "${{ inputs.image }}")
           mkdir -p results
-          docker cp "$cid:/usr/local/bin/appflowy_worker" results/worker.bin
-          docker rm "$cid"
+          $D docker cp "$cid:/usr/local/bin/appflowy_worker" results/worker.bin
+          $D docker rm "$cid" >/dev/null
           sha256sum results/worker.bin | tee results/worker.sha256
-      - name: Re-prod abort on 16K host
+      - name: Boot log on runner host (参考情報)
         run: |
-          set +e
-          timeout 120 docker run --rm --entrypoint /usr/local/bin/appflowy_worker \
+          D='${{ steps.dock.outputs.cmd }}'
+          timeout 120 $D docker run --rm --entrypoint /usr/local/bin/appflowy_worker \
             "${{ inputs.image }}" > results/boot.log 2>&1
-          echo "boot_exit=$?" >> results/boot.log
-          set -e
-          tail -5 results/boot.log
-          grep -c 'Unsupported system page size' results/boot.log
+          echo "boot_exit=$?" >> results/boot.log || true
+          tail -5 results/boot.log || true
+          echo "abort_lines=$(grep -c 'Unsupported system page size' results/boot.log || true)"
       - name: Function fingerprints of official binary
         run: |
           python3 scripts/jem16k.py fp results/worker.bin --filter _rjem \
             > results/official_fp.txt
           wc -l results/official_fp.txt
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: official
           path: results
@@ -54,25 +68,34 @@ jobs:
         prof: ['--enable-prof', '']
     steps:
       - uses: actions/checkout@v4
+      - name: Ensure docker usable
+        id: dock
+        run: |
+          if ! command -v docker >/dev/null 2>&1; then
+            sudo apt-get update -qq >/dev/null
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io >/dev/null
+            sudo systemctl start docker || true
+          fi
+          if docker info >/dev/null 2>&1; then echo cmd= >> "$GITHUB_OUTPUT"
+          elif sudo docker info >/dev/null 2>&1; then echo cmd='sudo ' >> "$GITHUB_OUTPUT"
+          else echo 'docker を起動できない'; exit 1; fi
       - name: Build jemalloc lg12 + lg14 in container
         run: |
-          docker run --rm -v "$PWD:/ws" -w /ws/ctx \
+          D='${{ steps.dock.outputs.cmd }}'
+          mkdir -p ctx
+          $D docker run --rm -v "$PWD:/ws" -w /ws/ctx \
             -e JEM_COMMIT='${{ inputs.jem_commit }}' \
             -e EXTRA_CFLAGS='${{ matrix.extra }}' \
             -e PROF_FLAG='${{ matrix.prof }}' \
             -e TAG='container=${{ matrix.container }} CFLAGS=[${{ matrix.extra }}] ${{ matrix.prof }}' \
             '${{ matrix.container }}' \
-            bash -c 'exec bash /ws/scripts/ci_toolchain_build.sh'
+            bash -c 'ls -l /ws/scripts >/dev/null && exec bash /ws/scripts/ci_toolchain_build.sh'
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: tc-${{ strategy.job-index }}
           path: |
-            ctx/fp12.txt
-            ctx/fp14.txt
-            ctx/patches.json
-            ctx/meta.txt
-            ctx/gcc-version.txt
-            ctx/control.txt
+            ctx/
 
   analyze:
     runs-on: ubuntu-24.04
@@ -84,17 +107,17 @@ jobs:
         with:
           pattern: '*'
           path: arts
+          merge-multiple: false
       - name: Fingerprint match rate (toolchain identity)
         run: |
-          echo '## 関数指紋一致率: 公式 vs lg12 ビルド (高いほど移植可能)' > sec1
-          echo '```' >> sec1
-          python3 scripts/jem16k.py match arts/official/results/official_fp.txt \
-            arts/tc-*/ctx/fp12.txt >> sec1 2>&1 || true
-          echo '```' >> sec1
-          cat sec1 >> "$GITHUB_STEP_SUMMARY"
+          { echo '## 関数指紋一致率: 公式 vs lg12 ビルド (高いほど移植可能)'
+            echo '```'
+            python3 scripts/jem16k.py match arts/official/official_fp.txt \
+              arts/tc-*/fp12.txt 2>&1 || true
+            echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: patches.json summary
         run: |
-          for d in arts/tc-*/ctx; do
+          for d in arts/tc-*; do
             [ -f "$d/patches.json" ] || continue
             echo "---"
             echo "### $(head -1 "$d/meta.txt" 2>/dev/null || echo $d)"

@@ -3,7 +3,11 @@
 # 命令差分 JSON / 関数指紋 / 16K 起動対照テストを ctx/ に残す。
 # 前提: /ws にリポジトリが bind mount され、cwd は /ws/ctx。
 set -euo pipefail
-: "${JEM_COMMIT:?JEM_COMMIT を設定}"
+# 取得元: tikv-jemallocator 0.6.x が vendoring している jemalloc。
+# crate 版の "+" サフィックスが公式バイナリ埋込み文字列
+# (5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7) と完全一致する。
+CRATE_VER="${CRATE_VER:-0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7}"
+JEMALLOC_REF="${JEMALLOC_REF:-0.6.1}"   # tikv/jemallocator のタグ (フォールバック)
 EXTRA_CFLAGS="${EXTRA_CFLAGS:-}"
 PROF_FLAG="${PROF_FLAG:---enable-prof}"
 
@@ -16,18 +20,45 @@ else
     python3 pkgconf diffutils patch >/dev/null
 fi
 
-git clone -q https://github.com/jemalloc/jemalloc jem
-git -C jem -c advice.detachedHead=false checkout "$JEM_COMMIT"
-( cd jem && autoconf )   # configure スクリプト生成 (リポジトリには同梱されていない)
+# --- jemalloc 源の取得 -----------------------------------------------------
+# 注意: e13ca993... は jemalloc/jemalloc 本体には存在しない (tikv fork のみ)。
+# 1) crates.io tarball (公式が実際にビルドした実源そのもの)
+# 2) 失敗時: github.com/tikv/jemallocator タグ clone (vendored + 同梱 configure)
+ok=0
+if command -v curl >/dev/null 2>&1    && curl -fsSL --retry 3 -o crate.crate \
+      "https://static.crates.io/crates/tikv-jemalloc-sys/tikv-jemalloc-sys-${CRATE_VER}.crate"; then
+  tar xf crate.crate && rm -f crate.crate
+  mv "tikv-jemalloc-sys-${CRATE_VER}" crate
+  SRC=crate/jemalloc; CONF=crate/configure/configure
+  JE_VERSION="${CRATE_VER#*+}"
+  echo "source=crate tikv-jemalloc-sys-${CRATE_VER}" > source.txt
+  ok=1
+else
+  git clone -q --branch "$JEMALLOC_REF" --single-branch --depth 1 \
+    https://github.com/tikv/jemallocator repo
+  SRC=repo/jemalloc-sys/jemalloc; CONF=repo/jemalloc-sys/configure/configure
+  JE_VERSION=$(sed -n 's/^version *= *"\([^"]*\)+\([^"]*\)".*/\2/p' \
+                 repo/jemalloc-sys/Cargo.toml | head -1)
+  echo "source=tikv/jemallocator tag $JEMALLOC_REF (crate 取得失敗のフォールバック)" > source.txt
+fi
+[ -d "$SRC" ] || { echo "想定外のソース構成"; ls -R . | head -60; exit 1; }
+[ -n "$JE_VERSION" ] || JE_VERSION=unknown
 gcc -v > gcc-version.txt 2>&1
-printf '%s\n%s\n' "${TAG:-unknown}" "$(cat jem/VERSION)" > meta.txt
+{ echo "${TAG:-unknown}"; cat source.txt; echo "JE_VERSION=$JE_VERSION"; } > meta.txt
 
 for LG in 12 14; do
-  mkdir -p "b$LG"
+  # build.rs と同じ手順: 源ツリーをビルド dir へコピーし、同梱 configure を
+  # 上書きしてツリー内で実行する (in-tree build)。
+  rm -rf "b$LG"
+  cp -a "$SRC" "b$LG"
+  [ -f "$CONF" ] && cp "$CONF" "b$LG/configure"
+  if [ ! -f "b$LG/configure" ]; then
+    ( cd "b$LG" && autoconf ) || { echo "configure が見つからず"; exit 1; }
+  fi
   ( cd "b$LG" \
-    && ../jem/configure --with-jemalloc-prefix=_rjem_ \
-         --with-private-namespace=_rjem_ --disable-cxx --enable-doc=no \
+    && sh ./configure --with-version="$JE_VERSION" --disable-cxx --enable-doc=no \
          --enable-shared=no ${PROF_FLAG} --enable-stats \
+         --with-jemalloc-prefix=_rjem_ --with-private-namespace=_rjem_ \
          --with-lg-page="$LG" CC=gcc CFLAGS="$EXTRA_CFLAGS" \
          > configure.log 2>&1 \
     && make -j"$(nproc)" > build.log 2>&1 )

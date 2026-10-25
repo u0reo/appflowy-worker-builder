@@ -5,9 +5,12 @@ on:
       image:
         description: 解析対象の公式 worker イメージ
         default: appflowyinc/appflowy_worker:latest
-      jem_commit:
-        description: 公式バイナリに組込まれた jemalloc のコミット
-        default: e13ca993e8ccb9ba9847cc330696e02839f328f7
+      crate_version:
+        description: jemalloc 源 = tikv-jemalloc-sys crate 版 (+ 以降は公式バイナリの版文字列と一致)
+        default: 0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7
+      jemallocator_ref:
+        description: crates.io 取得失敗時のフォールバック (tikv/jemallocator のタグ)
+        default: 0.6.1
 
 jobs:
   extract:
@@ -86,12 +89,14 @@ jobs:
           D='${{ steps.dock.outputs.cmd }}'
           mkdir -p ctx
           $D docker run --rm -v "$PWD:/ws" -w /ws/ctx \
-            -e JEM_COMMIT='${{ inputs.jem_commit }}' \
+            -e CRATE_VER='${{ inputs.crate_version }}' \
+            -e JEMALLOC_REF='${{ inputs.jemallocator_ref }}' \
             -e EXTRA_CFLAGS='${{ matrix.extra }}' \
             -e PROF_FLAG='${{ matrix.prof }}' \
             -e TAG='container=${{ matrix.container }} CFLAGS=[${{ matrix.extra }}] ${{ matrix.prof }}' \
             '${{ matrix.container }}' \
-            bash -c 'ls -l /ws/scripts >/dev/null && exec bash /ws/scripts/ci_toolchain_build.sh'
+            bash -c 'ls -l /ws/scripts >/dev/null && exec bash /ws/scripts/ci_toolchain_build.sh' \
+            2>&1 | tee "ctx/build-${{ strategy.job-index }}.stdout.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

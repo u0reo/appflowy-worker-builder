@@ -162,7 +162,7 @@ jobs:
       - name: Compare appflowy function-name sets
         run: |
           set -euo pipefail
-          # 関数名からジェネリック単相化ハッシュ (…17h<16hex>E) を 정규화して集合化。
+          # 関数名からジェネリック単相化ハッシュ (…17h<16hex>E) を 正規化して集合化。
           # アロケータ (jemalloc) 有無は worker 由来名には無関係なので信号は clean。
           names() {
             readelf -sW "$1" \

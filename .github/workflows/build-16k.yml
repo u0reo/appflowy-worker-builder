@@ -279,22 +279,30 @@ jobs:
               echo "attempt $img failed: $(printf %s "$last" | tail -1)" >&2
             done
             msg="image pull 失敗 [${*}] last=$(printf %s "$last" | tail -1 | tr -d "\r\n" | cut -c1-300)"
-            echo "::error::$msg" >&2
+            echo "::${PULL_ANNOT:-error}::$msg" >&2
             echo "$msg" >> "$GITHUB_STEP_SUMMARY"
             return 1
           }
           docker network create dep >/dev/null
           PG="$(pull postgres:15 mirror.gcr.io/library/postgres:15)"
           RD="$(pull redis:7 mirror.gcr.io/library/redis:7)"
-          MDO="$(pull minio/minio:latest quay.io/minio/minio:latest)"
-          MC="$(pull minio/mc:latest quay.io/minio/mc:latest)"
+          # minio は任意: runner からの匿名 pull が docker.io/quay.io 双方で
+          # unauthorized を返す事例あり (2026-10-26 run 実測)。Pi 実測で S3 非到
+          # 達でも /metrics 200 + 生存を確認済みなので失敗時は S3 なしで続行。
+          MDO="$(PULL_ANNOT=warning pull minio/minio:latest quay.io/minio/minio:latest || true)"
+          MC="$(PULL_ANNOT=warning pull minio/mc:latest quay.io/minio/mc:latest || true)"
           docker run -d --name pg --network dep \
             -e POSTGRES_USER=appflowy -e POSTGRES_PASSWORD=appflowy \
             -e POSTGRES_DB=appflowy "$PG" >/dev/null
           docker run -d --name rd --network dep "$RD" >/dev/null
-          docker run -d --name mdo --network dep \
-            -e MINIO_ROOT_USER=appflowy -e MINIO_ROOT_PASSWORD=appflowypass \
-            "$MDO" server /data >/dev/null
+          if [ -n "$MDO" ]; then
+            docker run -d --name mdo --network dep \
+              -e MINIO_ROOT_USER=appflowy -e MINIO_ROOT_PASSWORD=appflowypass \
+              "$MDO" server /data >/dev/null
+          else
+            echo "smoke: minio イメージ取得不可 — S3 なしで検証続行" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
           pg=''; rd=''
           for i in $(seq 1 90); do
             pg="$(docker exec pg pg_isready -U appflowy -d appflowy >/dev/null 2>&1 && echo ok || true)"
@@ -309,7 +317,7 @@ jobs:
           # バケット作成は best effort: worker は起動時にバケットを触るタスクが
           # 無い限り不要 (Pi 実測で minio 不在でも /metrics 200 + 生存)。失敗は
           # warning に格下げして worker 起動検証を優先する。
-          if ! docker run --rm --network dep "$MC" sh -c '
+          if [ -n "$MDO" ] && [ -n "$MC" ] && ! docker run --rm --network dep "$MC" sh -c '
             i=0
             while [ $i -lt 60 ]; do
               if mc alias set local http://mdo:9000 appflowy appflowypass &&
@@ -334,7 +342,13 @@ jobs:
       - name: Run worker and probe /metrics
         run: |
           set -euo pipefail
+          # pull() は Start deps の shell 関数なのでこの步骤で再定義
+          pull() { docker pull -q "$1" 2>/dev/null && echo "$1"; }
           WK="$(pull "${TARGET_IMAGE}:${VER}-amd64")"
+          # minio 不在時は到達不能 URL を使用 (Pi 実測で connection refused
+          # なら起動に支障がないことを確認済み)
+          S3URL="${MDO:+http://mdo:9000}"
+          S3URL="${S3URL:-http://127.0.0.1:9999}"
           docker run -d --name wk --network dep \
             -e APPFLOWY_ENVIRONMENT=production \
             -e APPFLOWY_WORKER_ENVIRONMENT=production \
@@ -344,7 +358,7 @@ jobs:
             -e APPFLOWY_WORKER_DATABASE_NAME=appflowy \
             -e APPFLOWY_WORKER_IMPORT_TICK_INTERVAL=5 \
             -e APPFLOWY_S3_USE_MINIO=true \
-            -e APPFLOWY_S3_MINIO_URL=http://mdo:9000 \
+            -e APPFLOWY_S3_MINIO_URL="${S3URL}" \
             -e APPFLOWY_S3_ACCESS_KEY=appflowy \
             -e APPFLOWY_S3_SECRET_KEY=appflowypass \
             -e APPFLOWY_S3_BUCKET=appflowy \

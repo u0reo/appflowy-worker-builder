@@ -264,19 +264,22 @@ jobs:
           # 共有 runner からの docker.io 匿名/共有制限 (toomanyrequests) に備え
           # mirror.gcr.io / quay.io へフォールバック。実際のエラー文言は
           # annotation と summary へ出す (ログ viewing 不能でも読める様に)。
+          #stdout  は画像名专ら返す (呼び出し側が $() で受ける)。诊断は
+          #  必ず stderr へ — stdout に出すと捕捉されて消える (過去 run の教訓)。
           pull() {
             last=""
             for img in "$@"; do
               for a in 1 2; do
                 if out="$(docker pull -q "$img" 2>&1)"; then
+                  echo "pulled: $img" >&2
                   echo "$img"; return 0
                 fi
                 last="$out"; sleep 4
               done
-              echo "attempt $img failed: $(printf %s "$last" | tail -1)"
+              echo "attempt $img failed: $(printf %s "$last" | tail -1)" >&2
             done
-            msg="image pull 失敗 [${*}] last=$(printf %s "$last" | tail -1 | tr -d "\r")"
-            echo "::error::$msg"
+            msg="image pull 失敗 [${*}] last=$(printf %s "$last" | tail -1 | tr -d "\r\n" | cut -c1-300)"
+            echo "::error::$msg" >&2
             echo "$msg" >> "$GITHUB_STEP_SUMMARY"
             return 1
           }
@@ -303,14 +306,19 @@ jobs:
             echo "::error::deps 起動失敗 (pg=$pg redis=$rd)"
             exit 1
           fi
-          docker run --rm --network dep "$MC" sh -c '
+          # バケット作成は best effort: worker は起動時にバケットを触るタスクが
+          # 無い限り不要 (Pi 実測で minio 不在でも /metrics 200 + 生存)。失敗は
+          # warning に格下げして worker 起動検証を優先する。
+          if ! docker run --rm --network dep "$MC" sh -c '
             i=0
-            while [ $i -lt 40 ]; do
+            while [ $i -lt 60 ]; do
               if mc alias set local http://mdo:9000 appflowy appflowypass &&
                  mc mb -p local/appflowy; then exit 0; fi
               i=$((i+1)); sleep 3
             done
-            exit 1'
+            exit 1''; then
+            echo "::warning::minio バケット作成失敗 — worker 検証は継続"
+          fi
 
       - name: Dump deps logs on failure
         if: failure()

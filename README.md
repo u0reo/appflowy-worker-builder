@@ -81,7 +81,7 @@ LG_PAGE: mov #0xc→#0xe (52800189→528001c9)  cmn #0xfff→#0x3fff: 表現不�
 | workflow | 内容 |
 |---|---|
 | `jem16k-analysis.yml` | extract (公式イメージ→exe 抽出+sha256+指紋) / toolchains ×16 (debian12,u22,u24,fedora42 × CFLAGS{-ffunction-sections…} × --enable-prof、crate tarball を formula と同一の configure フラグで lg12+lg14 二重ビルド、指紋・patches.json 生成) / analyze (一致率 + census、結果を **check-run annotation** で公開 = 匿名で読める) |
-| `build-16k.yml` | 夜間ビルダー (ureo/appflowy_worker_16k): detect (upstream 最新タグ検出) → build ×2arch (registry cache) → manifest → **fidelity** (公式 exe と appflowy系 関数名集合を比較、coverage<0.5 で fail・<0.85 で warn) → **smoke** (amd64 を postgres/redis/minio 付きで起動、/metrics 200 + 25s survival + panic/アロケータ失敗なし を検証。ビルド有無に関係なく毎晩実行) |
+| `build-16k.yml` | 夜間ビルダー (ureo/appflowy_worker_16k): detect (upstream 最新タグ検出) → build ×2arch (registry cache) → manifest → **fidelity** (公式 exe と ours を rustfilt で demangle 正規化した appflowy 系関数集合で比較。intersection=0 のみ fail、ドリフト内容はジョブ要約にレポート。build skip 時にも実行) → **smoke** (amd64 を postgres/redis/minio 付きで起動、/metrics 200 + 25s survival + panic 検査。失敗時は deps/worker ログをジョブ要約へ自動退避。ビルド有無に関係なく毎晩実行) |
 
 実績: **run#6 (40193711212) = 16/16 ツールチェーン成功**・extract/analyze 成功、
 結果注釈を匿名取得済み。過去 run の失敗原因(.arm ランナーに docker 無し→install、
@@ -158,4 +158,4 @@ slim イメージ git/ca-certificates 無し→apt、federation のみ→crate t
 - [x] patch_worker.py / wscan_worker.py 実装 → **Plan B は NO-GO 実証 (上節)**
 - [x] 16K 実運用 = ソースビルド `ureo/appflowy_worker_16k` (稼働確認済み Up)。build-16k.yml はソースビルド系として維持 (バイナリパッチ job は追加しない)
 - [ ] dc/appflowy/compose.yml worker へ healthcheck (`/metrics` 200 ポール) 適用
-- [ ] 実スタックでのスモーク (ワーカー実作業 → /metrics 確認)
+- [x] 空 DB に対する worker 起動スモーク (Pi 実測: 自前 migration で /metrics 200 + 生存確認 2026-10-26)

@@ -353,7 +353,12 @@ jobs:
           # なら起動に支障がないことを確認済み)
           if [ -n "${MDO:-}" ]; then S3URL=http://mdo:9000
           else S3URL=http://127.0.0.1:9999; fi
-          docker run -d --name wk --network dep \
+          # イメージ実体(arch/entrypoint)とデーモン応答を annotation 化
+          docker image inspect "$WK" \
+            --format '{{.Architecture}}/{{.Os}} ep={{.Config.Entrypoint}} cmd={{.Config.Cmd}}' \
+            > /tmp/img.txt 2>&1 || true
+          echo "::warning::image=$(cat /tmp/img.txt | head -c 220)"
+          if ! rerr="$(docker run -d --name wk --network dep \
             -e APPFLOWY_ENVIRONMENT=production \
             -e APPFLOWY_WORKER_ENVIRONMENT=production \
             -e RUST_LOG=info \
@@ -373,7 +378,10 @@ jobs:
             -e APPFLOWY_MAILER_SMTP_USERNAME=smoke \
             -e APPFLOWY_MAILER_SMTP_PASSWORD=smoke \
             -e APPFLOWY_MAILER_SMTP_TLS_KIND=wrapper \
-            "$WK"
+            "$WK" 2>&1)"; then
+            echo "::error::docker run 拒否: $(printf %s "$rerr" | tail -2 | tr '\r\n' ';;' | cut -c1-400)" >&2
+            exit 125
+          fi
           ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' wk)"
           ok=false
           for i in $(seq 1 60); do
